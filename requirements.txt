@@ -1,0 +1,33 @@
+# ==========================================
+# DEPENDENCIAS CORE
+# ==========================================
+
+# Framework UI
+nicegui>=1.4.0
+
+# JWT handling
+pyjwt>=2.8.0
+
+# HTTP client async
+httpx>=0.25.0
+
+# Variables de entorno
+python-dotenv>=1.0.0
+
+# ==========================================
+# DEPENDENCIAS OPCIONALES (DESARROLLO)
+# ==========================================
+
+# Testing
+# pytest>=7.4.0
+# pytest-asyncio>=0.21.0
+# pytest-cov>=4.1.0
+
+# Code quality
+# black>=23.0.0
+# ruff>=0.1.0
+# mypy>=1.5.0
+
+# Debugging
+# ipdb>=0.13.13
+# rich>=13.5.0

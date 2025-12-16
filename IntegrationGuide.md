@@ -1,0 +1,516 @@
+# Guía de Integración - NiceGUI con APSA Dashboard
+
+## 🎯 Objetivo
+
+Esta guía te llevará paso a paso para integrar tu aplicación NiceGUI con el sistema SSO del portal APSA Dashboard.
+
+## 📋 Pre-requisitos
+
+Antes de comenzar, asegúrate de tener:
+
+- ✅ Acceso al portal APSA Dashboard (como administrador)
+- ✅ Docker y Docker Compose instalados
+- ✅ Nginx configurado como proxy reverso (hay un ERROR, el proxy reverso es Apache, no nginx, las configuraciones deberían ser para Apache)
+- ✅ Dominio/subdominio accesible (ej: `petunia.apsagroup.com`)
+
+## 🚀 Paso 1: Clonar la Plantilla
+
+```bash
+# Opción A: Clonar desde repositorio
+git clone <repo-url> mi-aplicacion-nicegui
+cd mi-aplicacion-nicegui
+
+# Opción B: Copiar archivos manualmente
+mkdir mi-aplicacion-nicegui
+cd mi-aplicacion-nicegui
+# Copiar main.py, Dockerfile, docker-compose.yml, etc.
+```
+
+## 📝 Paso 2: Configurar Variables de Entorno
+
+```bash
+# 1. Copiar plantilla
+cp .env.example .env
+
+# 2. Editar con tu editor favorito
+nano .env
+```
+
+### Variables Críticas a Configurar
+
+```env
+# URL del portal (DEBE ser HTTPS en producción)
+PORTAL_URL=https://petunia.apsagroup.com
+
+# Nombre de tu aplicación (será visible en el portal)
+APP_NAME=Mi Aplicación Cool
+
+# CRÍTICO: Debe coincidir con el nombre registrado en el portal
+APP_AUDIENCE=mi-app-cool
+
+# Base path del proxy reverso
+BASE_PATH=/mi-app-cool
+```
+
+### ⚠️ IMPORTANTE: APP_AUDIENCE
+
+El valor de `APP_AUDIENCE` debe coincidir **EXACTAMENTE** con el campo `name` de la webapp en la base de datos del portal APSA Dashboard:
+
+```sql
+-- En la BD del portal, el campo name debe ser igual:
+SELECT name FROM webapps WHERE name = 'mi-app-cool';
+```
+
+Si no coinciden → **Token inválido** → Autenticación falla ❌
+
+## 🏗️ Paso 3: Registrar en APSA Dashboard
+
+### 3.1 Acceder al Panel de Administración
+
+1. Ir a `https://petunia.apsagroup.com`
+2. Login como administrador
+3. Click en "Panel Administración"
+
+### 3.2 Crear Nueva Aplicación
+
+1. Ir a **"Aplicaciones Web"** → **"Nueva Aplicación"**
+
+2. **Completar formulario:**
+   ```
+   Nombre:          mi-app-cool        # ← DEBE coincidir con APP_AUDIENCE
+   Descripción:     Mi Aplicación Cool
+   URL:             https://petunia.apsagroup.com/mi-app-cool/
+   Categoría:       [Seleccionar apropiada]
+   Tipo (Origin):   internal           # ← Para SSO con JWT
+   Icono:           bi-grid-3x3        # ← Cualquier icono Bootstrap
+   Activa:          ✓ Sí
+   ```
+
+3. **Guardar**
+
+### 3.3 Asignar Permisos
+
+1. Ir a **"Perfiles de Acceso"**
+2. Editar el perfil deseado (ej: "Desarrollador")
+3. Marcar checkbox de "mi-app-cool"
+4. Guardar
+
+O alternativamente:
+
+1. Ir a **"Usuarios"**
+2. Editar usuario específico
+3. En "Aplicaciones Adicionales" marcar "mi-app-cool"
+4. Guardar
+
+## 🔧 Paso 4: Configurar Nginx
+
+### 4.1 Editar Configuración del Virtual Host
+
+```bash
+sudo nano /etc/nginx/sites-available/petunia.apsagroup.com
+```
+
+### 4.2 Agregar Location Block
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name petunia.apsagroup.com;
+    
+    # ... configuración SSL existente ...
+    
+    # ============================================
+    # LOCATION PARA PORTAL APSA DASHBOARD
+    # ============================================
+    location / {
+        proxy_pass http://localhost:5000;
+        # ... headers existentes ...
+    }
+    
+    # ============================================
+    # LOCATION PARA TU APLICACIÓN NICEGUI
+    # ============================================
+    location /mi-app-cool/ {
+        # Proxy a tu aplicación
+        proxy_pass http://localhost:8080/;
+        
+        # Headers críticos
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+        
+        # CRÍTICO: WebSocket support para NiceGUI
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+        
+        # Buffer settings
+        proxy_buffering off;
+    }
+}
+```
+
+### 4.3 Validar y Recargar Nginx
+
+```bash
+# Validar sintaxis
+sudo nginx -t
+
+# Si está OK, recargar
+sudo systemctl reload nginx
+```
+
+## 🐳 Paso 5: Construir y Ejecutar con Docker
+
+### 5.1 Construir Imagen
+
+```bash
+# Construir imagen
+docker compose build
+
+# O si quieres forzar reconstrucción completa
+docker compose build --no-cache
+```
+
+### 5.2 Ejecutar Contenedor
+
+```bash
+# Iniciar en background
+docker compose up -d
+
+# Ver logs en tiempo real
+docker compose logs -f
+```
+
+### 5.3 Verificar Estado
+
+```bash
+# Ver estado del contenedor
+docker compose ps
+
+# Debería mostrar algo como:
+# NAME                STATUS              PORTS
+# nicegui-sso-demo    Up 10 seconds       0.0.0.0:8080->8080/tcp
+```
+
+### 5.4 Health Check
+
+```bash
+# Verificar health endpoint
+curl http://localhost:8080/health
+
+# Respuesta esperada:
+{
+  "status": "healthy",
+  "app": "Mi Aplicación Cool",
+  "audience": "mi-app-cool"
+}
+```
+
+## ✅ Paso 6: Probar la Integración
+
+### 6.1 Flujo Completo de Autenticación
+
+1. **Ir al portal:** `https://petunia.apsagroup.com`
+
+2. **Login con Google** (o administrador local)
+
+3. **En el dashboard**, buscar tu aplicación en el menú lateral
+
+4. **Click en "Mi Aplicación Cool"**
+
+5. **Verificar que:**
+   - ✅ La aplicación carga correctamente
+   - ✅ Se muestra tu nombre e email
+   - ✅ Se listan tus permisos
+   - ✅ La información del token es correcta
+
+### 6.2 Verificar Logs
+
+```bash
+# Ver logs de autenticación
+docker compose logs | grep "Token validado"
+
+# Debería mostrar algo como:
+# ✓ Token validado para usuario: usuario@example.com
+# ✓ Sesión establecida para: usuario@example.com
+# ✓ Renovación automática iniciada (cada 240s)
+```
+
+### 6.3 Verificar Renovación Automática
+
+Espera 4-5 minutos y verifica los logs:
+
+```bash
+docker compose logs | grep "renovado"
+
+# Debería mostrar:
+# ✓ Token auto-renovado (14:35:42)
+```
+
+## 🐛 Troubleshooting Común
+
+### Problema 1: "Token inválido o expirado"
+
+**Síntoma:** Error inmediato al cargar la aplicación
+
+**Verificación:**
+```bash
+# 1. Verificar APP_AUDIENCE en .env
+cat .env | grep APP_AUDIENCE
+
+# 2. Verificar nombre en base de datos del portal
+docker exec -it apsa-dashboard-db psql -U apsa_user -d apsa_dashboard \
+  -c "SELECT id, name FROM webapps WHERE name LIKE '%mi-app%';"
+
+# 3. Deben coincidir EXACTAMENTE
+```
+
+**Solución:**
+```bash
+# Si no coinciden, actualizar .env
+nano .env
+# Cambiar APP_AUDIENCE al valor correcto
+
+# Reiniciar
+docker compose restart
+```
+
+### Problema 2: "No se proporcionó token"
+
+**Síntoma:** Error al acceder directamente a la URL
+
+**Causa:** Acceso directo sin pasar por portal
+
+**Solución:**
+```
+❌ NO: https://petunia.apsagroup.com/mi-app-cool/
+✅ SÍ: https://petunia.apsagroup.com → Click en app
+```
+
+### Problema 3: WebSocket Connection Failed
+
+**Síntoma:** Error en consola del navegador
+
+**Verificación:**
+```bash
+# Verificar configuración de Nginx
+sudo nginx -t
+
+# Verificar que tenga WebSocket support
+sudo cat /etc/nginx/sites-enabled/petunia.apsagroup.com | grep -A5 "mi-app-cool"
+```
+
+**Solución:**
+
+Asegurar que Nginx tenga:
+```nginx
+proxy_http_version 1.1;
+proxy_set_header Upgrade $http_upgrade;
+proxy_set_header Connection "upgrade";
+```
+
+### Problema 4: "Error obteniendo clave pública"
+
+**Síntoma:** Falla al validar token
+
+**Verificación:**
+```bash
+# Verificar conectividad con portal
+docker compose exec nicegui-demo curl https://petunia.apsagroup.com/internal/public-key
+```
+
+**Solución:**
+```bash
+# 1. Verificar PORTAL_URL en .env
+cat .env | grep PORTAL_URL
+
+# 2. Verificar que portal esté corriendo
+curl https://petunia.apsagroup.com/health
+
+# 3. Invalidar cache y reintentar
+docker compose exec nicegui-demo rm -f cache/portal_public.pem
+docker compose restart
+```
+
+## 🎨 Paso 7: Personalizar UI
+
+### 7.1 Modificar main.py
+
+```python
+# Reemplazar las funciones create_*_card() con tu UI personalizada
+
+@ui.page('/')
+async def index_page():
+    # Mantener autenticación
+    await auth_middleware()
+    
+    auth_error = app.storage.user.get('auth_error')
+    if auth_error:
+        # Mostrar error (puedes personalizar)
+        show_error_page(auth_error)
+        return
+    
+    user_data = session_manager.get_current_user()
+    if not user_data:
+        show_loading()
+        return
+    
+    # ============================================
+    # TU UI PERSONALIZADA AQUÍ
+    # ============================================
+    create_header(user_data)
+    
+    with ui.column().classes('w-full p-8'):
+        ui.label(f'¡Hola {user_data["name"]}!').classes('text-3xl')
+        
+        # Tu funcionalidad aquí
+        with ui.card():
+            ui.label('Mi Funcionalidad Cool')
+            ui.button('Hacer algo', on_click=mi_funcion)
+```
+
+### 7.2 Agregar Nuevas Páginas
+
+```python
+@ui.page('/mi-pagina')
+async def mi_pagina():
+    # SIEMPRE incluir middleware primero
+    await auth_middleware()
+    
+    user_data = session_manager.get_current_user()
+    if not user_data:
+        ui.navigate.to('/')
+        return
+    
+    # Tu página aquí
+    ui.label('Mi Página Protegida')
+```
+
+## 📦 Paso 8: Desplegar a Producción
+
+### 8.1 Preparación
+
+```bash
+# 1. Revisar variables de entorno
+cat .env
+
+# 2. Asegurar que PORTAL_URL sea HTTPS
+# PORTAL_URL=https://petunia.apsagroup.com  ✓
+
+# 3. Construir imagen optimizada
+docker compose build --no-cache
+```
+
+### 8.2 Iniciar en Producción
+
+```bash
+# Iniciar con restart policy
+docker compose up -d
+
+# Verificar logs
+docker compose logs -f
+
+# Debería ver:
+# ✓ Clave pública descargada y cacheada
+# ✓ Token validado para usuario: ...
+```
+
+### 8.3 Monitoreo Continuo
+
+```bash
+# Ver estado
+docker compose ps
+
+# Ver uso de recursos
+docker stats nicegui-sso-demo
+
+# Ver logs recientes
+docker compose logs --tail=100 -f
+```
+
+## 🔄 Paso 9: Mantenimiento
+
+### Actualizar Aplicación
+
+```bash
+# 1. Hacer backup de personalizaciones
+cp main.py main.py.backup
+
+# 2. Pull últimos cambios (si usas git)
+git pull origin main
+
+# 3. Reconstruir
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+```
+
+### Rotar Caché de Clave Pública
+
+```bash
+# Si la clave RSA del portal cambia
+docker compose exec nicegui-demo rm -f cache/portal_public.pem
+docker compose restart
+```
+
+### Ver Logs Históricos
+
+```bash
+# Logs de un periodo específico
+docker compose logs --since 2024-01-10T10:00:00
+
+# Logs con timestamp
+docker compose logs -t
+```
+
+## ✨ Consejos Finales
+
+### Seguridad
+
+1. ✅ **NUNCA** almacenar tokens en localStorage del navegador
+2. ✅ **SIEMPRE** usar `app.storage.user` de NiceGUI
+3. ✅ **VALIDAR** token en cada request crítico
+4. ✅ **RENOVAR** tokens automáticamente antes de expiración
+
+### Performance
+
+1. ✅ **Cache** de clave pública RSA (ya implementado)
+2. ✅ **Lazy loading** de componentes pesados
+3. ✅ **Optimizar** queries a la base de datos (si aplica)
+4. ✅ **Comprimir** assets estáticos
+
+### UX
+
+1. ✅ **Indicadores de carga** mientras valida token
+2. ✅ **Mensajes de error** claros y útiles
+3. ✅ **Notificaciones** de renovación de sesión
+4. ✅ **Logout** limpio que limpie sesión
+
+## 📚 Recursos Adicionales
+
+- [Documentación APSA Dashboard](../README.md)
+- [NiceGUI Documentation](https://nicegui.io/)
+- [JWT Best Practices](https://tools.ietf.org/html/rfc8725)
+- [Docker Compose Reference](https://docs.docker.com/compose/)
+
+## 🆘 Obtener Ayuda
+
+Si encuentras problemas:
+
+1. ✅ Revisar esta guía completa
+2. ✅ Consultar logs: `docker compose logs -f`
+3. ✅ Verificar configuración del portal
+4. ✅ Consultar troubleshooting en README.md
+5. ✅ Abrir issue en repositorio
+
+---
+
+**¡Éxito con tu integración!** 🎉

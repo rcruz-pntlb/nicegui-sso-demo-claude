@@ -1,0 +1,27 @@
+services:
+  nicegui-sso-demo:
+    build: .
+    container_name: nicegui-sso-demo
+    restart: unless-stopped
+    environment:
+      - PORTAL_URL=${PORTAL_URL:-https://petunia.apsagroup.com}
+      - APP_NAME=${APP_NAME:-NiceGUI Demo}
+      - APP_AUDIENCE=${APP_AUDIENCE:-nicegui-demo}
+      - BASE_PATH=${BASE_PATH:-/nicegui-demo}
+    volumes:
+      - ./cache:/app/cache
+    ports:
+      - "8080:8080"
+
+    # Traefik Labels (Optional but recommended for full integration)
+    labels:
+      - "traefik.enable=true"
+      # Router - HTTP
+      - "traefik.http.routers.nicegui-demo.rule=PathPrefix(`${BASE_PATH:-/nicegui-demo}`)"
+      - "traefik.http.routers.nicegui-demo.entrypoints=websecure"
+      - "traefik.http.routers.nicegui-demo.tls=true"
+      # Middlewares - Strip Prefix (Important so app receives '/')
+      - "traefik.http.middlewares.nicegui-strip.stripprefix.prefixes=${BASE_PATH:-/nicegui-demo}"
+      - "traefik.http.routers.nicegui-demo.middlewares=nicegui-strip"
+      # Service
+      - "traefik.http.services.nicegui-demo.loadbalancer.server.port=8080"

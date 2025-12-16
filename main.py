@@ -1,0 +1,592 @@
+"""
+NiceGUI SSO Demo - Plantilla de referencia para integración con APSA Dashboard
+Versión: 1.0.0
+Autor: APSA Group
+Fecha: 2025-01-10
+
+Esta aplicación demuestra:
+- Validación de tokens JWT del portal APSA Dashboard
+- Manejo de sesiones de usuario con app.storage
+- Renovación automática de tokens
+- UI responsive y funcional
+- Configuración para proxy reverso (https://petunia.apsagroup.com/nicegui-demo/)
+"""
+
+from nicegui import ui, app
+import jwt
+import httpx
+import os
+from datetime import datetime, timezone
+from typing import Optional, Dict
+import asyncio
+from pathlib import Path
+
+# ==========================================
+# CONFIGURACIÓN
+# ==========================================
+
+class Config:
+    """Configuración centralizada de la aplicación"""
+    
+    # Portal SSO
+    PORTAL_URL = os.getenv('PORTAL_URL', 'https://petunia.apsagroup.com')
+    PORTAL_PUBLIC_KEY_ENDPOINT = f'{PORTAL_URL}/internal/public-key'
+    PORTAL_VERIFY_ENDPOINT = f'{PORTAL_URL}/internal/verify'
+    PORTAL_REFRESH_ENDPOINT = f'{PORTAL_URL}/internal/refresh'
+    
+    # Aplicación
+    APP_NAME = os.getenv('APP_NAME', 'NiceGUI SSO Demo')
+    APP_AUDIENCE = os.getenv('APP_AUDIENCE', 'nicegui-demo')
+    
+    # Tokens
+    TOKEN_REFRESH_INTERVAL = int(os.getenv('TOKEN_REFRESH_INTERVAL', '240'))  # 4 minutos
+    TOKEN_MIN_VALIDITY = int(os.getenv('TOKEN_MIN_VALIDITY', '60'))  # 1 minuto
+    
+    # Proxy
+    BASE_PATH = os.getenv('BASE_PATH', '/nicegui-demo')
+    
+    # Cache
+    PUBLIC_KEY_PATH = Path('cache/portal_public.pem')
+
+
+# ==========================================
+# GESTIÓN DE CLAVE PÚBLICA
+# ==========================================
+
+class PublicKeyManager:
+    """Gestor de clave pública RSA del portal con cache"""
+    
+    def __init__(self):
+        self._public_key: Optional[str] = None
+        self._ensure_cache_dir()
+    
+    def _ensure_cache_dir(self):
+        """Crear directorio de cache si no existe"""
+        Config.PUBLIC_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
+    
+    async def get_public_key(self) -> str:
+        """Obtener clave pública (desde cache o descargando)"""
+        if self._public_key:
+            return self._public_key
+        
+        # Intentar cargar desde cache
+        if Config.PUBLIC_KEY_PATH.exists():
+            try:
+                self._public_key = Config.PUBLIC_KEY_PATH.read_text()
+                print(f'✓ Clave pública cargada desde cache')
+                return self._public_key
+            except Exception as e:
+                print(f'⚠ Error leyendo cache: {e}')
+        
+        # Descargar desde portal
+        try:
+            async with httpx.AsyncClient(verify=True) as client:
+                response = await client.get(
+                    Config.PORTAL_PUBLIC_KEY_ENDPOINT,
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                self._public_key = response.text
+                
+                # Guardar en cache
+                Config.PUBLIC_KEY_PATH.write_text(self._public_key)
+                print(f'✓ Clave pública descargada y cacheada')
+                return self._public_key
+        
+        except Exception as e:
+            error_msg = f'Error obteniendo clave pública: {e}'
+            print(f'✗ {error_msg}')
+            raise RuntimeError(error_msg)
+    
+    def invalidate_cache(self):
+        """Invalidar cache de clave pública"""
+        self._public_key = None
+        if Config.PUBLIC_KEY_PATH.exists():
+            Config.PUBLIC_KEY_PATH.unlink()
+            print('✓ Cache de clave pública invalidado')
+
+
+# Instancia global
+public_key_manager = PublicKeyManager()
+
+
+# ==========================================
+# VALIDACIÓN DE TOKENS
+# ==========================================
+
+class TokenValidator:
+    """Validador de tokens JWT del portal"""
+    
+    @staticmethod
+    async def validate_token(token: str) -> Optional[Dict]:
+        """
+        Validar token JWT contra el portal
+        
+        Args:
+            token: Token JWT a validar
+            
+        Returns:
+            Payload del token si es válido, None si es inválido
+        """
+        if not token:
+            return None
+        
+        try:
+            # Obtener clave pública
+            public_key = await public_key_manager.get_public_key()
+            
+            # Validar token localmente
+            payload = jwt.decode(
+                token,
+                public_key,
+                algorithms=['RS256'],
+                audience=Config.APP_AUDIENCE,
+                options={'verify_exp': True}
+            )
+            
+            print(f'✓ Token validado para usuario: {payload.get("email")}')
+            return payload
+        
+        except jwt.ExpiredSignatureError:
+            print('⚠ Token expirado')
+            return None
+        except jwt.InvalidAudienceError:
+            print(f'✗ Audience inválido. Esperado: {Config.APP_AUDIENCE}')
+            return None
+        except jwt.InvalidTokenError as e:
+            print(f'✗ Token inválido: {e}')
+            return None
+        except Exception as e:
+            print(f'✗ Error validando token: {e}')
+            return None
+    
+    @staticmethod
+    async def refresh_token(current_token: str) -> Optional[str]:
+        """
+        Renovar token a través del portal
+        
+        Args:
+            current_token: Token actual a renovar
+            
+        Returns:
+            Nuevo token si se renovó exitosamente, None si falló
+        """
+        try:
+            async with httpx.AsyncClient(verify=True) as client:
+                response = await client.post(
+                    Config.PORTAL_REFRESH_ENDPOINT,
+                    json={'token': current_token},
+                    timeout=10.0
+                )
+                response.raise_for_status()
+                
+                data = response.json()
+                new_token = data.get('token')
+                
+                if new_token:
+                    print('✓ Token renovado exitosamente')
+                    return new_token
+                else:
+                    print('✗ Respuesta de refresh sin token')
+                    return None
+        
+        except Exception as e:
+            print(f'✗ Error renovando token: {e}')
+            return None
+
+
+# ==========================================
+# GESTIÓN DE SESIÓN
+# ==========================================
+
+class SessionManager:
+    """Gestor de sesión de usuario con renovación automática"""
+    
+    def __init__(self):
+        self._refresh_task = None
+    
+    def get_current_user(self) -> Optional[Dict]:
+        """Obtener datos del usuario actual"""
+        return app.storage.user.get('user_data')
+    
+    def get_current_token(self) -> Optional[str]:
+        """Obtener token actual"""
+        return app.storage.user.get('sso_token')
+    
+    async def set_session(self, token: str, user_data: Dict):
+        """
+        Establecer sesión de usuario
+        
+        Args:
+            token: Token JWT validado
+            user_data: Datos del usuario del payload
+        """
+        app.storage.user['sso_token'] = token
+        app.storage.user['user_data'] = user_data
+        app.storage.user['login_time'] = datetime.now(timezone.utc).isoformat()
+        
+        print(f'✓ Sesión establecida para: {user_data.get("email")}')
+        
+        # Iniciar renovación automática
+        await self.start_token_refresh()
+    
+    def clear_session(self):
+        """Limpiar sesión de usuario"""
+        if self._refresh_task:
+            self._refresh_task.cancel()
+            self._refresh_task = None
+        
+        app.storage.user.clear()
+        print('✓ Sesión limpiada')
+    
+    async def start_token_refresh(self):
+        """Iniciar tarea de renovación automática de token"""
+        if self._refresh_task:
+            self._refresh_task.cancel()
+        
+        async def refresh_loop():
+            """Loop de renovación de token"""
+            while True:
+                try:
+                    await asyncio.sleep(Config.TOKEN_REFRESH_INTERVAL)
+                    
+                    current_token = self.get_current_token()
+                    if not current_token:
+                        break
+                    
+                    # Renovar token
+                    new_token = await TokenValidator.refresh_token(current_token)
+                    
+                    if new_token:
+                        # Validar nuevo token
+                        user_data = await TokenValidator.validate_token(new_token)
+                        
+                        if user_data:
+                            app.storage.user['sso_token'] = new_token
+                            app.storage.user['user_data'] = user_data
+                            print(f'✓ Token auto-renovado ({datetime.now().strftime("%H:%M:%S")})')
+                        else:
+                            print('✗ Nuevo token inválido, cerrando sesión')
+                            self.clear_session()
+                            break
+                    else:
+                        print('✗ Fallo en renovación, cerrando sesión')
+                        self.clear_session()
+                        break
+                
+                except asyncio.CancelledError:
+                    break
+                except Exception as e:
+                    print(f'✗ Error en loop de renovación: {e}')
+                    break
+        
+        self._refresh_task = asyncio.create_task(refresh_loop())
+        print(f'✓ Renovación automática iniciada (cada {Config.TOKEN_REFRESH_INTERVAL}s)')
+
+
+# Instancia global
+session_manager = SessionManager()
+
+
+# ==========================================
+# MIDDLEWARE DE AUTENTICACIÓN
+# ==========================================
+
+async def auth_middleware():
+    """Middleware para validar autenticación en cada request"""
+    
+    # Excluir rutas públicas
+    if app.storage.user.get('auth_checked'):
+        return
+    
+    # Obtener token de URL o sesión
+    token = None
+    
+    # 1. Intentar obtener de query params (primera carga desde portal)
+    if hasattr(ui.context.client, 'query'):
+        token = ui.context.client.query.get('token')
+        if token:
+            print(f'✓ Token recibido desde URL')
+    
+    # 2. Si no hay en URL, intentar desde sesión
+    if not token:
+        token = session_manager.get_current_token()
+        if token:
+            print(f'✓ Token recuperado de sesión')
+    
+    # 3. Si no hay token, mostrar error
+    if not token:
+        print('✗ No se encontró token')
+        app.storage.user['auth_checked'] = True
+        app.storage.user['auth_error'] = 'No se proporcionó token de autenticación'
+        return
+    
+    # 4. Validar token
+    user_data = await TokenValidator.validate_token(token)
+    
+    if user_data:
+        await session_manager.set_session(token, user_data)
+        app.storage.user['auth_checked'] = True
+        print(f'✓ Usuario autenticado: {user_data.get("email")}')
+    else:
+        app.storage.user['auth_checked'] = True
+        app.storage.user['auth_error'] = 'Token inválido o expirado'
+        print('✗ Autenticación fallida')
+
+
+# ==========================================
+# COMPONENTES UI
+# ==========================================
+
+def create_header(user_data: Dict):
+    """Crear header de la aplicación"""
+    with ui.header().classes('items-center justify-between bg-blue-600 text-white'):
+        with ui.row().classes('items-center gap-4'):
+            ui.icon('app_registration', size='2rem')
+            ui.label(Config.APP_NAME).classes('text-xl font-bold')
+        
+        with ui.row().classes('items-center gap-2'):
+            if user_data.get('picture'):
+                ui.image(user_data['picture']).classes('w-10 h-10 rounded-full')
+            ui.label(user_data.get('name', 'Usuario')).classes('font-semibold')
+            ui.button(icon='logout', on_click=logout).props('flat dense').classes('text-white')
+
+
+def create_user_card(user_data: Dict):
+    """Crear tarjeta de información del usuario"""
+    with ui.card().classes('w-full max-w-2xl'):
+        ui.label('Información del Usuario').classes('text-2xl font-bold mb-4')
+        
+        with ui.grid(columns=2).classes('gap-4 w-full'):
+            # Nombre
+            with ui.column().classes('gap-1'):
+                ui.label('Nombre').classes('text-sm text-gray-600')
+                ui.label(user_data.get('name', 'N/A')).classes('font-semibold')
+            
+            # Email
+            with ui.column().classes('gap-1'):
+                ui.label('Email').classes('text-sm text-gray-600')
+                ui.label(user_data.get('email', 'N/A')).classes('font-semibold')
+            
+            # Perfil
+            with ui.column().classes('gap-1'):
+                ui.label('Perfil').classes('text-sm text-gray-600')
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('badge', size='sm').classes('text-blue-600')
+                    ui.label(user_data.get('profile', 'N/A')).classes('font-semibold')
+            
+            # ID Usuario
+            with ui.column().classes('gap-1'):
+                ui.label('ID Usuario').classes('text-sm text-gray-600')
+                ui.label(f"#{user_data.get('sub', 'N/A')}").classes('font-mono')
+
+
+def create_permissions_card(user_data: Dict):
+    """Crear tarjeta de permisos"""
+    permissions = user_data.get('permissions', [])
+    
+    with ui.card().classes('w-full max-w-2xl'):
+        ui.label('Permisos y Aplicaciones').classes('text-2xl font-bold mb-4')
+        
+        if permissions:
+            with ui.column().classes('gap-2 w-full'):
+                for perm in permissions:
+                    with ui.row().classes('items-center gap-2 p-2 bg-gray-50 rounded'):
+                        ui.icon('check_circle', size='sm').classes('text-green-600')
+                        ui.label(perm).classes('font-semibold')
+        else:
+            ui.label('No hay permisos asignados').classes('text-gray-500 italic')
+
+
+def create_token_card(user_data: Dict):
+    """Crear tarjeta de información del token"""
+    with ui.card().classes('w-full max-w-2xl'):
+        ui.label('Información del Token').classes('text-2xl font-bold mb-4')
+        
+        with ui.grid(columns=2).classes('gap-4 w-full'):
+            # Emisor
+            with ui.column().classes('gap-1'):
+                ui.label('Emisor (iss)').classes('text-sm text-gray-600')
+                ui.label(user_data.get('iss', 'N/A')).classes('font-mono')
+            
+            # Audiencia
+            with ui.column().classes('gap-1'):
+                ui.label('Audiencia (aud)').classes('text-sm text-gray-600')
+                ui.label(user_data.get('aud', 'N/A')).classes('font-mono')
+            
+            # Emisión
+            with ui.column().classes('gap-1'):
+                ui.label('Emitido (iat)').classes('text-sm text-gray-600')
+                iat = user_data.get('iat')
+                if iat:
+                    dt = datetime.fromtimestamp(iat, tz=timezone.utc)
+                    ui.label(dt.strftime('%Y-%m-%d %H:%M:%S UTC')).classes('font-mono')
+                else:
+                    ui.label('N/A').classes('font-mono')
+            
+            # Expiración
+            with ui.column().classes('gap-1'):
+                ui.label('Expira (exp)').classes('text-sm text-gray-600')
+                exp = user_data.get('exp')
+                if exp:
+                    dt = datetime.fromtimestamp(exp, tz=timezone.utc)
+                    now = datetime.now(timezone.utc)
+                    remaining = dt - now
+                    
+                    ui.label(dt.strftime('%Y-%m-%d %H:%M:%S UTC')).classes('font-mono')
+                    
+                    if remaining.total_seconds() > 0:
+                        mins = int(remaining.total_seconds() / 60)
+                        ui.label(f'(Válido por {mins} minutos)').classes('text-xs text-green-600')
+                    else:
+                        ui.label('(Expirado)').classes('text-xs text-red-600')
+                else:
+                    ui.label('N/A').classes('font-mono')
+            
+            # JTI
+            with ui.column().classes('gap-1 col-span-2'):
+                ui.label('ID Token (jti)').classes('text-sm text-gray-600')
+                ui.label(user_data.get('jti', 'N/A')).classes('font-mono text-xs')
+
+
+def create_session_card():
+    """Crear tarjeta de información de sesión"""
+    login_time = app.storage.user.get('login_time')
+    
+    with ui.card().classes('w-full max-w-2xl'):
+        ui.label('Información de Sesión').classes('text-2xl font-bold mb-4')
+        
+        with ui.column().classes('gap-2 w-full'):
+            # Hora de login
+            if login_time:
+                with ui.row().classes('items-center gap-2'):
+                    ui.icon('login', size='sm').classes('text-blue-600')
+                    ui.label(f'Login: {login_time}').classes('font-mono text-sm')
+            
+            # Estado de renovación
+            with ui.row().classes('items-center gap-2'):
+                ui.icon('sync', size='sm').classes('text-green-600')
+                ui.label(f'Auto-renovación: Cada {Config.TOKEN_REFRESH_INTERVAL}s').classes('text-sm')
+
+
+# ==========================================
+# PÁGINAS
+# ==========================================
+
+@ui.page('/')
+async def index_page():
+    """Página principal de la aplicación"""
+    
+    # Ejecutar middleware de autenticación
+    await auth_middleware()
+    
+    # Verificar si hay error de autenticación
+    auth_error = app.storage.user.get('auth_error')
+    if auth_error:
+        with ui.column().classes('w-full h-screen items-center justify-center gap-4 p-8'):
+            ui.icon('error', size='4rem').classes('text-red-600')
+            ui.label('Error de Autenticación').classes('text-3xl font-bold text-red-600')
+            ui.label(auth_error).classes('text-gray-600')
+            ui.label('Esta aplicación debe ser accedida a través del portal APSA Dashboard').classes('text-sm text-gray-500')
+            
+            with ui.card().classes('mt-4 p-4 bg-blue-50'):
+                ui.label('Información de Integración').classes('font-bold mb-2')
+                ui.label(f'• Audiencia esperada: {Config.APP_AUDIENCE}').classes('text-sm')
+                ui.label(f'• Portal URL: {Config.PORTAL_URL}').classes('text-sm')
+                ui.label(f'• Base path: {Config.BASE_PATH}').classes('text-sm')
+        return
+    
+    # Obtener datos del usuario
+    user_data = session_manager.get_current_user()
+    
+    if not user_data:
+        with ui.column().classes('w-full h-screen items-center justify-center gap-4 p-8'):
+            ui.spinner(size='xl').classes('text-blue-600')
+            ui.label('Validando autenticación...').classes('text-xl')
+        return
+    
+    # UI Principal
+    create_header(user_data)
+    
+    with ui.column().classes('w-full items-center p-8 gap-6'):
+        # Título
+        with ui.row().classes('items-center gap-2 mb-4'):
+            ui.icon('verified_user', size='2rem').classes('text-green-600')
+            ui.label('Autenticación Exitosa').classes('text-3xl font-bold text-green-600')
+        
+        ui.label('Integración SSO con APSA Dashboard funcionando correctamente').classes('text-gray-600 mb-4')
+        
+        # Tarjetas de información
+        create_user_card(user_data)
+        create_permissions_card(user_data)
+        create_token_card(user_data)
+        create_session_card()
+        
+        # Footer
+        with ui.row().classes('gap-4 mt-8'):
+            ui.link('Documentación', Config.PORTAL_URL).classes('text-blue-600')
+            ui.link('GitHub', 'https://github.com/apsa-group').classes('text-blue-600')
+
+
+@ui.page('/health')
+def health_check():
+    """Health check endpoint"""
+    return {
+        'status': 'healthy',
+        'app': Config.APP_NAME,
+        'audience': Config.APP_AUDIENCE
+    }
+
+
+# ==========================================
+# ACCIONES
+# ==========================================
+
+def logout():
+    """Cerrar sesión del usuario"""
+    session_manager.clear_session()
+    ui.navigate.to('/')
+    ui.notify('Sesión cerrada', type='positive')
+
+
+# ==========================================
+# CONFIGURACIÓN DE LA APLICACIÓN
+# ==========================================
+
+# Configurar título y favicon
+ui.page_title = Config.APP_NAME
+
+# Configurar storage
+app.add_static_files('/static', 'static')
+
+# Dark mode opcional
+# ui.dark_mode().enable()
+
+
+# ==========================================
+# MAIN
+# ==========================================
+
+if __name__ in {"__main__", "__mp_main__"}:
+    # Configurar puerto y host
+    port = int(os.getenv('PORT', '8080'))
+    host = os.getenv('HOST', '0.0.0.0')
+    
+    print('=' * 60)
+    print(f'🚀 {Config.APP_NAME}')
+    print('=' * 60)
+    print(f'📍 URL Local: http://localhost:{port}')
+    print(f'🌐 URL Pública: {Config.PORTAL_URL}{Config.BASE_PATH}')
+    print(f'🎯 Audiencia: {Config.APP_AUDIENCE}')
+    print(f'🔄 Auto-refresh: {Config.TOKEN_REFRESH_INTERVAL}s')
+    print('=' * 60)
+    
+    ui.run(
+        host=host,
+        port=port,
+        title=Config.APP_NAME,
+        reload=False,
+        show=False,
+        favicon='🔐',
+        storage_secret=os.getenv('STORAGE_SECRET', 'WLU-C1yWU7dhhFfXQatn4vzTsHFZj-FkWiggeydlmy4')
+    )
