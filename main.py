@@ -20,6 +20,9 @@ from datetime import datetime, timezone
 from typing import Optional, Dict
 import asyncio
 from pathlib import Path
+from fastapi import Request
+from fastapi.responses import RedirectResponse
+
 
 # ==========================================
 # CONFIGURACIÓN
@@ -473,11 +476,24 @@ def create_session_card():
 # PÁGINAS
 # ==========================================
 
-@ui.page('/')
-async def index_page():
-    """Página principal de la aplicación"""
+@app.post('/')
+async def sso_callback(request: Request):
+    """Manejador del callback POST del SSO"""
+    form_data = await request.form()
+    token = form_data.get('token')
     
-    # Ejecutar middleware de autenticación
+    if token:
+        # Redirigir a GET con token en query
+        return RedirectResponse(
+            url=f'/?token={token}',
+            status_code=303  # See Other - fuerza GET después de POST
+        )
+    return RedirectResponse(url='/', status_code=303)
+
+@ui.page('/')
+async def index_page():  # ← Ya no necesita request ni methods
+    
+    # Ejecutar middleware de autenticación (solo en GET)
     await auth_middleware()
     
     # Verificar si hay error de autenticación
@@ -525,8 +541,7 @@ async def index_page():
         # Footer
         with ui.row().classes('gap-4 mt-8'):
             ui.link('Documentación', Config.PORTAL_URL).classes('text-blue-600')
-            ui.link('GitHub', 'https://github.com/apsa-group').classes('text-blue-600')
-
+            ui.link('GitHub', 'https://github.com/rcruz-pntlb/nicegui-sso-demo-claude').classes('text-blue-600')
 
 @ui.page('/health')
 def health_check():
