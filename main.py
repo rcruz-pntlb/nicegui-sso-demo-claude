@@ -589,6 +589,6 @@ if __name__ in {"__main__", "__mp_main__"}:
         reload=False,
         show=False,
         favicon='🔐',
-        storage_secret=os.getenv('STORAGE_SECRET', 'WLU-C1yWU7dhhFfXQatn4vzTsHFZj-FkWiggeydlmy4')
-        forwarded_allow_ips='*',
+        storage_secret=os.getenv('STORAGE_SECRET', 'WLU-C1yWU7dhhFfXQatn4vzTsHFZj-FkWiggeydlmy4'),
+        forwarded_allow_ips='*'
     )
