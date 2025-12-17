@@ -571,6 +571,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     # Configurar puerto y host
     port = int(os.getenv('PORT', '8080'))
     host = os.getenv('HOST', '0.0.0.0')
+    base_path = os.getenv('BASE_PATH', '/nicegui-demo')
     
     print('=' * 60)
     print(f'🚀 {Config.APP_NAME}')
@@ -589,4 +590,5 @@ if __name__ in {"__main__", "__mp_main__"}:
         show=False,
         favicon='🔐',
         storage_secret=os.getenv('STORAGE_SECRET', 'WLU-C1yWU7dhhFfXQatn4vzTsHFZj-FkWiggeydlmy4')
+        forwarded_allow_ips='*',
     )
