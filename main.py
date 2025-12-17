@@ -12,7 +12,8 @@ Esta aplicación demuestra:
 - Configuración para proxy reverso (https://petunia.apsagroup.com/nicegui-demo/)
 """
 
-from nicegui import ui, app
+from nicegui import ui
+from nicegui import app as nicegui_app
 import jwt
 import httpx
 import os
@@ -476,7 +477,8 @@ def create_session_card():
 # PÁGINAS
 # ==========================================
 
-@app.post('/')
+#@app.post('/')
+@nicegui_app.app.post('/')
 async def sso_callback(request: Request):
     """Manejador del callback POST del SSO"""
     form_data = await request.form()
@@ -596,6 +598,9 @@ if __name__ in {"__main__", "__mp_main__"}:
     print(f'🎯 Audiencia: {Config.APP_AUDIENCE}')
     print(f'🔄 Auto-refresh: {Config.TOKEN_REFRESH_INTERVAL}s')
     print('=' * 60)
+    
+    from nicegui import app as nicegui_app
+    nicegui_app.app.root_path = base_path
     
     ui.run(
         host=host,
