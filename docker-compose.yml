@@ -12,6 +12,8 @@ services:
       - ./cache:/app/cache
     ports:
       - "8080:8080"
+    extra_hosts:
+      - "petunia.apsagroup.com:host-gateway"
 
     # Traefik Labels (Optional but recommended for full integration)
     labels:

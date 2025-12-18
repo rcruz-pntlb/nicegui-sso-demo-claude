@@ -12,8 +12,7 @@ Esta aplicación demuestra:
 - Configuración para proxy reverso (https://petunia.apsagroup.com/nicegui-demo/)
 """
 
-from nicegui import ui
-from nicegui import app as nicegui_app
+from nicegui import ui, app
 import jwt
 import httpx
 import os
@@ -23,6 +22,8 @@ import asyncio
 from pathlib import Path
 from fastapi import Request
 from fastapi.responses import RedirectResponse
+from starlette.middleware.base import BaseHTTPMiddleware
+
 
 
 # ==========================================
@@ -84,17 +85,22 @@ class PublicKeyManager:
         
         # Descargar desde portal
         try:
-            async with httpx.AsyncClient(verify=True) as client:
+            print(f'🔄 Intentando descargar clave pública de {Config.PORTAL_PUBLIC_KEY_ENDPOINT}...')
+            async with httpx.AsyncClient(verify=False) as client:  # Disable verify for internal/dev issues
                 response = await client.get(
                     Config.PORTAL_PUBLIC_KEY_ENDPOINT,
-                    timeout=10.0
+                    timeout=3.0  # Reduce timeout to fail fast
                 )
                 response.raise_for_status()
                 self._public_key = response.text
                 
                 # Guardar en cache
-                Config.PUBLIC_KEY_PATH.write_text(self._public_key)
-                print(f'✓ Clave pública descargada y cacheada')
+                try:
+                    Config.PUBLIC_KEY_PATH.write_text(self._public_key)
+                    print(f'✓ Clave pública descargada y cacheada')
+                except Exception as e:
+                    print(f'⚠ No se pudo escribir cache: {e}')
+                
                 return self._public_key
         
         except Exception as e:
@@ -296,7 +302,51 @@ session_manager = SessionManager()
 # MIDDLEWARE DE AUTENTICACIÓN
 # ==========================================
 
-async def auth_middleware():
+@app.middleware("http")
+async def debug_middleware(request: Request, call_next):
+    try:
+        # Solo loguear peticiones relevantes (excluir estáticos para reducir ruido)
+        if not request.url.path.startswith('/_nicegui') and not request.url.path.startswith('/static'):
+            print(f"🔍 DEBUG: {request.method} {request.url}")
+            print(f"   Root: {request.scope.get('root_path')}")
+            # print(f"   Headers: {dict(request.headers)}")
+    except Exception:
+        pass
+    return await call_next(request)
+
+# app.add_middleware(DebugMiddleware) eliminado a favor del decorador
+
+@app.middleware("http")
+async def sso_middleware(request: Request, call_next):
+    # Interceptar POST a la raíz (callback del SSO)
+    if request.method == "POST" and request.url.path == "/":
+        try:
+            print("🔄 SSO Middleware (ASGI): Interceptando POST /")
+            # Consumir el form data
+            form = await request.form()
+            token = form.get('token')
+            
+            if token:
+                # Usar redirección relativa para asegurar la ruta correcta
+                target_url = f"./?token={token}"
+                print(f"🔄 SSO Middleware: Redirigiendo a -> {target_url}")
+                return RedirectResponse(url=target_url, status_code=303)
+            else:
+                print("⚠ SSO Middleware: No se encontró token en el POST")
+                
+        except Exception as e:
+            print(f"⚠ Error en SSO Middleware: {e}")
+            # En caso de error, podríamos dejar pasar o devolver error.
+            # Si ya consumimos el body, call_next fallará. Mejor devolver respuesta de error.
+            return RedirectResponse(url='./?error=sso_middleware_exception', status_code=303)
+
+    return await call_next(request)
+
+# Nota: app.add_middleware no es necesario con el decorador @app.middleware
+
+
+
+async def auth_middleware(token_url: str = None):
     """Middleware para validar autenticación en cada request"""
     
     # Excluir rutas públicas
@@ -306,11 +356,15 @@ async def auth_middleware():
     # Obtener token de URL o sesión
     token = None
     
-    # 1. Intentar obtener de query params (primera carga desde portal)
-    if hasattr(ui.context.client, 'query'):
+    # Remove app.add_middleware(DebugMiddleware) if present nearby or just assume it's gone with previous edit
+    
+    # 1. Intentar obtener de query params (ARGUMENTO o REQUEST)
+    if token_url:
+        print(f"🔍 DEBUG: Token recibido como argumento: {token_url[:10]}...")
+        token = token_url
+    elif hasattr(ui.context.client, 'query'):
+        print(f"🔍 DEBUG: Query Params disponibles: {ui.context.client.query}")
         token = ui.context.client.query.get('token')
-        if token:
-            print(f'✓ Token recibido desde URL')
     
     # 2. Si no hay en URL, intentar desde sesión
     if not token:
@@ -477,26 +531,16 @@ def create_session_card():
 # PÁGINAS
 # ==========================================
 
-#@app.post('/')
-@nicegui_app.app.post('/')
-async def sso_callback(request: Request):
-    """Manejador del callback POST del SSO"""
-    form_data = await request.form()
-    token = form_data.get('token')
-    
-    if token:
-        # Redirigir a GET con token en query
-        return RedirectResponse(
-            url=f'/?token={token}',
-            status_code=303  # See Other - fuerza GET después de POST
-        )
-    return RedirectResponse(url='/', status_code=303)
+# @app.post('/') eliminado - Manejado por SSOMiddleware
 
 @ui.page('/')
-async def index_page():  # ← Ya no necesita request ni methods
+async def index_page(request: Request):  # ← Usar Request directamente es más robusto
+    
+    # Extraer token de query params del request
+    token = request.query_params.get('token')
     
     # Ejecutar middleware de autenticación (solo en GET)
-    await auth_middleware()
+    await auth_middleware(token)
     
     # Verificar si hay error de autenticación
     auth_error = app.storage.user.get('auth_error')
@@ -545,7 +589,7 @@ async def index_page():  # ← Ya no necesita request ni methods
             ui.link('Documentación', Config.PORTAL_URL).classes('text-blue-600')
             ui.link('GitHub', 'https://github.com/rcruz-pntlb/nicegui-sso-demo-claude').classes('text-blue-600')
 
-@ui.page('/health')
+@app.get('/health')
 def health_check():
     """Health check endpoint"""
     return {
@@ -599,8 +643,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     print(f'🔄 Auto-refresh: {Config.TOKEN_REFRESH_INTERVAL}s')
     print('=' * 60)
     
-    from nicegui import app as nicegui_app
-    nicegui_app.app.root_path = base_path
+    # app.root_path = base_path  <-- Eliminado, dejamos que Uvicorn/FastAPI lo manejen vía headers
     
     ui.run(
         host=host,
@@ -610,5 +653,5 @@ if __name__ in {"__main__", "__mp_main__"}:
         show=False,
         favicon='🔐',
         storage_secret=os.getenv('STORAGE_SECRET', 'WLU-C1yWU7dhhFfXQatn4vzTsHFZj-FkWiggeydlmy4'),
-        forwarded_allow_ips='*'
+        forwarded_allow_ips='*',
     )

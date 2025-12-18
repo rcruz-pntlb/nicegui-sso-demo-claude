@@ -10,7 +10,7 @@ Antes de comenzar, asegúrate de tener:
 
 - ✅ Acceso al portal APSA Dashboard (como administrador)
 - ✅ Docker y Docker Compose instalados
-- ✅ Nginx configurado como proxy reverso (hay un ERROR, el proxy reverso es Apache, no nginx, las configuraciones deberían ser para Apache)
+- ✅ Apache configurado como proxy reverso
 - ✅ Dominio/subdominio accesible (ej: `petunia.apsagroup.com`)
 
 ## 🚀 Paso 1: Clonar la Plantilla
@@ -102,69 +102,63 @@ O alternativamente:
 3. En "Aplicaciones Adicionales" marcar "mi-app-cool"
 4. Guardar
 
-## 🔧 Paso 4: Configurar Nginx
+## 🔧 Paso 4: Configurar Apache Reverse Proxy
 
-### 4.1 Editar Configuración del Virtual Host
+### 4.1 Editar Configuración del Virtual Host (Apache 2.4)
 
+Asegúrate de tener habilitados los módulos necesarios:
 ```bash
-sudo nano /etc/nginx/sites-available/petunia.apsagroup.com
+sudo a2enmod proxy proxy_http proxy_wstunnel rewrite headers
+sudo systemctl restart apache2
 ```
 
-### 4.2 Agregar Location Block
+Edita tu archivo de configuración (ej: `/etc/apache2/sites-available/petunia-apsagroup.conf`):
 
-```nginx
-server {
-    listen 443 ssl http2;
-    server_name petunia.apsagroup.com;
+```apache
+<VirtualHost *:443>
+    ServerName petunia.apsagroup.com
     
     # ... configuración SSL existente ...
-    
-    # ============================================
-    # LOCATION PARA PORTAL APSA DASHBOARD
-    # ============================================
-    location / {
-        proxy_pass http://localhost:5000;
-        # ... headers existentes ...
-    }
-    
+
     # ============================================
     # LOCATION PARA TU APLICACIÓN NICEGUI
     # ============================================
-    location /mi-app-cool/ {
-        # Proxy a tu aplicación
-        proxy_pass http://localhost:8080/;
+    <Location /nicegui-demo/>
+        ProxyPreserveHost On
         
-        # Headers críticos
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_set_header X-Forwarded-Host $host;
+        # Headers críticos para que la app sepa que está detrás de HTTPS
+        RequestHeader set X-Forwarded-Proto "https"
+        RequestHeader set X-Forwarded-Host "petunia.apsagroup.com"
+        RequestHeader set X-Forwarded-Port "443"
+        RequestHeader set X-Forwarded-Prefix "/nicegui-demo"
         
-        # CRÍTICO: WebSocket support para NiceGUI
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        # WebSocket Support (CRÍTICO para NiceGUI/SocketIO)
+        # Detecta headers de Upgrade y Connection para redirigir al protocolo ws://
+        # IMPORTANTE: RewriteRule elimina el prefijo /nicegui-demo/ antes de conectar
+        RewriteEngine On
+        RewriteCond %{HTTP:Upgrade} =websocket [NC]
+        RewriteCond %{HTTP:Connection} upgrade [NC]
+        RewriteRule ^/nicegui-demo/(.*)$ ws://localhost:8080/$1 [P,L]
         
-        # Timeouts
-        proxy_connect_timeout 60s;
-        proxy_send_timeout 60s;
-        proxy_read_timeout 60s;
+        # HTTP normal - ProxyPass también elimina el prefijo automáticamente
+        ProxyPass http://localhost:8080/
+        ProxyPassReverse http://localhost:8080/
         
-        # Buffer settings
-        proxy_buffering off;
-    }
-}
+    </Location>
+</VirtualHost>
 ```
 
-### 4.3 Validar y Recargar Nginx
+> [!NOTE]
+> Ajusta `localhost:8080` a la IP/host correcto donde corre tu contenedor Docker (ej: `http://172.17.0.2:8080/` o el nombre del servicio en docker-compose si Apache está en la misma red).
+
+### 4.2 Validar y Recargar Apache
 
 ```bash
 # Validar sintaxis
-sudo nginx -t
+sudo apachectl configtest
 
 # Si está OK, recargar
-sudo systemctl reload nginx
+sudo systemctl reload apache2
 ```
 
 ## 🐳 Paso 5: Construir y Ejecutar con Docker
@@ -301,21 +295,16 @@ docker compose restart
 
 **Verificación:**
 ```bash
-# Verificar configuración de Nginx
-sudo nginx -t
+# Verificar configuración de Apache
+sudo apachectl -t
 
-# Verificar que tenga WebSocket support
-sudo cat /etc/nginx/sites-enabled/petunia.apsagroup.com | grep -A5 "mi-app-cool"
+# Verificar log de errores
+sudo tail -f /var/log/apache2/error.log
 ```
 
 **Solución:**
 
-Asegurar que Nginx tenga:
-```nginx
-proxy_http_version 1.1;
-proxy_set_header Upgrade $http_upgrade;
-proxy_set_header Connection "upgrade";
-```
+Asegurar que Apache tenga los módulos cargados (`proxy_wstunnel`) y la RewriteRule correcta para WebSockets.
 
 ### Problema 4: "Error obteniendo clave pública"
 
