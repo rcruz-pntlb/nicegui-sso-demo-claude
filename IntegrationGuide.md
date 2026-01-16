@@ -63,6 +63,83 @@ SELECT name FROM webapps WHERE name = 'mi-app-cool';
 
 Si no coinciden → **Token inválido** → Autenticación falla ❌
 
+## 👨‍💻 Paso 2.5: Implementar Lógica SSO Lazy (Código Python)
+
+El sistema ahora utiliza **"Lazy SSO"** para eficiencia. Esto significa que tu aplicación debe realizar la validación en **dos pasos**:
+
+1. **Validar JWT (Local):** Verificar firma y expiración del token mínimo.
+2. **Obtener Datos (Remoto):** Llamar al endpoint `/internal/session-data` para obtener permisos y perfil.
+
+### Código de Validación en `main.py`
+
+Debes asegurarte de que tu función de validación se vea así:
+
+```python
+import requests
+import jwt
+
+# ... imports ...
+
+def validate_token_and_get_user(token: str) -> Optional[dict]:
+    """
+    Valida el token SSO en dos pasos:
+    1. Valida firma y expiración del JWT mínimo localmente
+    2. Recupera datos completos de sesión del Portal
+    
+    Args:
+        token: JWT string recibido en URL
+        
+    Returns:
+        dict: User data completo o None si es inválido
+    """
+    try:
+        # PASO 1: Validación Local del JWT Mínimo
+        # ----------------------------------------
+        # Solo verificamos que fue firmado por el Portal y es para nosotros
+        payload_min = jwt.decode(
+            token,
+            PUBLIC_KEY_CONTENT,  # Tu clave pública del portal
+            algorithms=['RS256'],
+            audience=os.getenv('APP_AUDIENCE')
+        )
+        
+        # PASO 2: Recuperación de Datos (Lazy Load)
+        # -----------------------------------------
+        # Usamos el JTI y Email para pedir los datos completos
+        # El portal valida que la sesión siga activa en Redis
+        response = requests.post(
+            f"{os.getenv('PORTAL_URL')}/internal/session-data",
+            json={
+                'jti': payload_min['jti'],
+                'email': payload_min['email']
+            },
+            timeout=5,  # Importante: timeout corto
+            headers={'Content-Type': 'application/json'}
+        )
+        
+        if response.status_code != 200:
+            print(f"❌ Error recuperando sesión: {response.text}")
+            return None
+            
+        # Retornamos el payload completo (con permisos, nombre, foto, etc.)
+        full_payload = response.json()
+        print(f"✅ Sesión recuperada para: {full_payload.get('email')}")
+        return full_payload
+
+    except jwt.ExpiredSignatureError:
+        print("❌ Token expirado")
+        return None
+    except jwt.InvalidTokenError as e:
+        print(f"❌ Token inválido: {e}")
+        return None
+    except Exception as e:
+        print(f"❌ Error inesperado en validación: {e}")
+        return None
+```
+
+> [!IMPORTANT]
+> El token JWT recibido en la URL **ya no contiene** `permissions`, `name` o `picture`. Si intentas usarlos directamente del token descifrado, tu aplicación fallará. **Debes** hacer la llamada a `/internal/session-data`.
+
 ## 🏗️ Paso 3: Registrar en APSA Dashboard
 
 ### 3.1 Acceder al Panel de Administración
@@ -102,9 +179,9 @@ O alternativamente:
 3. En "Aplicaciones Adicionales" marcar "mi-app-cool"
 4. Guardar
 
-## 🔧 Paso 4: Configurar Apache Reverse Proxy
+## 🔧 Paso 4: Asegurar Configuración Apache Reverse Proxy
 
-### 4.1 Editar Configuración del Virtual Host (Apache 2.4)
+### 4.1 Configuración del Virtual Host (Apache 2.4)
 
 Asegúrate de tener habilitados los módulos necesarios:
 ```bash

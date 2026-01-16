@@ -38,6 +38,7 @@ class Config:
     PORTAL_PUBLIC_KEY_ENDPOINT = f'{PORTAL_URL}/internal/public-key'
     PORTAL_VERIFY_ENDPOINT = f'{PORTAL_URL}/internal/verify'
     PORTAL_REFRESH_ENDPOINT = f'{PORTAL_URL}/internal/refresh'
+    PORTAL_SESSION_DATA_ENDPOINT = f'{PORTAL_URL}/internal/session-data'
     
     # Aplicación
     APP_NAME = os.getenv('APP_NAME', 'NiceGUI SSO Demo')
@@ -130,23 +131,27 @@ class TokenValidator:
     @staticmethod
     async def validate_token(token: str) -> Optional[Dict]:
         """
-        Validar token JWT contra el portal
+        Validar token JWT contra el portal usando estrategia Lazy SSO
         
         Args:
             token: Token JWT a validar
             
         Returns:
-            Payload del token si es válido, None si es inválido
+            Payload del token completo si es válido, None si es inválido
         """
         if not token:
             return None
         
         try:
+            # ----------------------------------------
+            # PASO 1: Validación Local del JWT Mínimo
+            # ----------------------------------------
             # Obtener clave pública
             public_key = await public_key_manager.get_public_key()
             
-            # Validar token localmente
-            payload = jwt.decode(
+            # Validar token localmente (firma y expiración)
+            # Nota: Este payload es "mínimo" (solo jti, sub, email, exp, iat)
+            payload_min = jwt.decode(
                 token,
                 public_key,
                 algorithms=['RS256'],
@@ -154,8 +159,29 @@ class TokenValidator:
                 options={'verify_exp': True}
             )
             
-            print(f'✓ Token validado para usuario: {payload.get("email")}')
-            return payload
+            # -----------------------------------------
+            # PASO 2: Recuperación de Datos (Lazy Load)
+            # -----------------------------------------
+            # Usar el token validado para solicitar los datos completos de sesión al portal
+            # El portal verificará que la sesión siga activa en Redis
+            async with httpx.AsyncClient(verify=False) as client:  # Verify false for internal/dev compatibility
+                response = await client.post(
+                    Config.PORTAL_SESSION_DATA_ENDPOINT,
+                    json={
+                        'jti': payload_min.get('jti'),
+                        'email': payload_min.get('email')
+                    },
+                    timeout=5.0
+                )
+                
+                if response.status_code != 200:
+                    print(f'✗ Error recuperando sesión remota: {response.text}')
+                    return None
+                
+                #Combinar/Usar los datos retornados por el portal que incluyen permisos, perfil, etc.
+                full_payload = response.json()
+                print(f'✓ Token validado y datos recuperados para: {full_payload.get("email")}')
+                return full_payload
         
         except jwt.ExpiredSignatureError:
             print('⚠ Token expirado')
@@ -633,6 +659,12 @@ if __name__ in {"__main__", "__mp_main__"}:
     port = int(os.getenv('PORT', '8080'))
     host = os.getenv('HOST', '0.0.0.0')
     base_path = os.getenv('BASE_PATH', '/nicegui-demo')
+
+    # Configurar límites de WebSocket via variables de entorno
+    # Estas variables son leídas directamente por Uvicorn
+    os.environ['WS_MAX_SIZE'] = os.getenv('WS_MAX_SIZE', str(20 * 1024 * 1024))  # 20MB
+    os.environ['WS_PING_INTERVAL'] = os.getenv('WS_PING_INTERVAL', '20')
+    os.environ['WS_PING_TIMEOUT'] = os.getenv('WS_PING_TIMEOUT', '20')    
     
     print('=' * 60)
     print(f'🚀 {Config.APP_NAME}')
@@ -641,6 +673,7 @@ if __name__ in {"__main__", "__mp_main__"}:
     print(f'🌐 URL Pública: {Config.PORTAL_URL}{Config.BASE_PATH}')
     print(f'🎯 Audiencia: {Config.APP_AUDIENCE}')
     print(f'🔄 Auto-refresh: {Config.TOKEN_REFRESH_INTERVAL}s')
+    print(f'📡 WS Max Size: {int(os.environ["WS_MAX_SIZE"]) / (1024*1024):.1f}MB')    
     print('=' * 60)
     
     # app.root_path = base_path  <-- Eliminado, dejamos que Uvicorn/FastAPI lo manejen vía headers

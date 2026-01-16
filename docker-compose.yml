@@ -8,6 +8,11 @@ services:
       - APP_NAME=${APP_NAME:-NiceGUI Demo}
       - APP_AUDIENCE=${APP_AUDIENCE:-nicegui-demo}
       - BASE_PATH=${BASE_PATH:-/nicegui-demo}
+      # ✅ CONFIGURACIÓN WEBSOCKET (CRÍTICO)
+      - WS_MAX_SIZE=${WS_MAX_SIZE:-20971520}
+      - WS_PING_INTERVAL=${WS_PING_INTERVAL:-20}
+      - WS_PING_TIMEOUT=${WS_PING_TIMEOUT:-20}
+      - TIMEOUT_KEEP_ALIVE=${TIMEOUT_KEEP_ALIVE:-300}
     volumes:
       - ./cache:/app/cache
     ports:
