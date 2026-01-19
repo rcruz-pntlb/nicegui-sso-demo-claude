@@ -70,13 +70,18 @@ class PublicKeyManager:
         """Crear directorio de cache si no existe"""
         Config.PUBLIC_KEY_PATH.parent.mkdir(parents=True, exist_ok=True)
     
-    async def get_public_key(self) -> str:
-        """Obtener clave pública (desde cache o descargando)"""
-        if self._public_key:
+    async def get_public_key(self, force_refresh: bool = False) -> str:
+        """
+        Obtener clave pública (desde cache o descargando)
+        
+        Args:
+            force_refresh: Si es True, ignora el cache y fuerza descarga
+        """
+        if self._public_key and not force_refresh:
             return self._public_key
         
-        # Intentar cargar desde cache
-        if Config.PUBLIC_KEY_PATH.exists():
+        # Intentar cargar desde cache (si no forzamos refresh)
+        if not force_refresh and Config.PUBLIC_KEY_PATH.exists():
             try:
                 self._public_key = Config.PUBLIC_KEY_PATH.read_text()
                 print(f'✓ Clave pública cargada desde cache')
@@ -128,8 +133,8 @@ public_key_manager = PublicKeyManager()
 class TokenValidator:
     """Validador de tokens JWT del portal"""
     
-    @staticmethod
-    async def validate_token(token: str) -> Optional[Dict]:
+    @classmethod
+    async def validate_token(cls, token: str) -> Optional[Dict]:
         """
         Validar token JWT contra el portal usando estrategia Lazy SSO
         
@@ -139,6 +144,11 @@ class TokenValidator:
         Returns:
             Payload del token completo si es válido, None si es inválido
         """
+        return await cls._validate_token_logic(token, force_refresh_key=False)
+
+    @classmethod
+    async def _validate_token_logic(cls, token: str, force_refresh_key: bool = False) -> Optional[Dict]:
+        """Lógica interna de validación con soporte para reintento"""
         if not token:
             return None
         
@@ -146,8 +156,8 @@ class TokenValidator:
             # ----------------------------------------
             # PASO 1: Validación Local del JWT Mínimo
             # ----------------------------------------
-            # Obtener clave pública
-            public_key = await public_key_manager.get_public_key()
+            # Obtener clave pública (forzando refresh si es un reintento)
+            public_key = await public_key_manager.get_public_key(force_refresh=force_refresh_key)
             
             # Validar token localmente (firma y expiración)
             # Nota: Este payload es "mínimo" (solo jti, sub, email, exp, iat)
@@ -183,6 +193,15 @@ class TokenValidator:
                 print(f'✓ Token validado y datos recuperados para: {full_payload.get("email")}')
                 return full_payload
         
+        except (jwt.InvalidSignatureError, jwt.DecodeError) as e:
+            # Si falla la firma y NO hemos forzado ya el refresh, intentamos de nuevo
+            if not force_refresh_key:
+                print(f'⚠ Error de firma ({e}). Intentando actualizar clave pública...')
+                return await cls._validate_token_logic(token, force_refresh_key=True)
+            else:
+                print(f'✗ Token con firma inválida (incluso tras actualizar clave): {e}')
+                return None
+                
         except jwt.ExpiredSignatureError:
             print('⚠ Token expirado')
             return None
@@ -371,11 +390,16 @@ async def sso_middleware(request: Request, call_next):
 # Nota: app.add_middleware no es necesario con el decorador @app.middleware
 
 
-
 async def auth_middleware(token_url: str = None):
     """Middleware para validar autenticación en cada request"""
     
-    # Excluir rutas públicas
+    # Si viene un token nuevo, forzamos re-validación limpiando estados de error previos
+    if token_url:
+        print(f"🔄 Forzando re-validación con nuevo token recibido")
+        app.storage.user['auth_checked'] = False
+        app.storage.user['auth_error'] = None
+    
+    # Excluir rutas públicas (si ya fue chequeado y no estamos forzando re-validación)
     if app.storage.user.get('auth_checked'):
         return
     

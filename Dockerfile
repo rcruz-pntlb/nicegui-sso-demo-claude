@@ -8,14 +8,10 @@ RUN apt-get update && apt-get install -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar archivos de dependencias
-COPY pyproject.toml pixi.lock* ./
+COPY requirements.txt ./
 
 # Instalar dependencias Python
-RUN pip install --no-cache-dir \
-    nicegui>=1.4.0 \
-    pyjwt>=2.8.0 \
-    httpx>=0.25.0 \
-    python-dotenv>=1.0.0
+RUN pip install --no-cache-dir -r requirements.txt
 
 # Copiar código de la aplicación
 COPY main.py .

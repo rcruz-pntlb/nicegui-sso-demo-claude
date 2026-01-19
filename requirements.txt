@@ -6,7 +6,7 @@
 nicegui>=1.4.0
 
 # JWT handling
-pyjwt>=2.8.0
+pyjwt[crypto]>=2.8.0
 
 # HTTP client async
 httpx>=0.25.0
