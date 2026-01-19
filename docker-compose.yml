@@ -5,6 +5,7 @@ services:
     restart: unless-stopped
     environment:
       - PORTAL_URL=${PORTAL_URL:-https://petunia.apsagroup.com}
+      - PORTAL_INTERNAL_URL=${PORTAL_INTERNAL_URL:-http://172.20.98.171:5000}
       - APP_NAME=${APP_NAME:-NiceGUI Demo}
       - APP_AUDIENCE=${APP_AUDIENCE:-nicegui-demo}
       - BASE_PATH=${BASE_PATH:-/nicegui-demo}
@@ -18,9 +19,12 @@ services:
     ports:
       - "8080:8080"
     extra_hosts:
+      # TEST: Usar host-gateway para acceder al host Docker
       - "petunia.apsagroup.com:host-gateway"
+      # PRODUCCIÓN: Descomentar y ajustar IP interna
+      # - "petunia.apsagroup.com:192.168.1.50"
 
-    # Traefik Labels (Optional but recommended for full integration)
+      # Traefik Labels (Optional but recommended for full integration)
     labels:
       - "traefik.enable=true"
       # Router - HTTP

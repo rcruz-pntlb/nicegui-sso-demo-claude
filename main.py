@@ -35,10 +35,11 @@ class Config:
     
     # Portal SSO
     PORTAL_URL = os.getenv('PORTAL_URL', 'https://petunia.apsagroup.com')
-    PORTAL_PUBLIC_KEY_ENDPOINT = f'{PORTAL_URL}/internal/public-key'
-    PORTAL_VERIFY_ENDPOINT = f'{PORTAL_URL}/internal/verify'
-    PORTAL_REFRESH_ENDPOINT = f'{PORTAL_URL}/internal/refresh'
-    PORTAL_SESSION_DATA_ENDPOINT = f'{PORTAL_URL}/internal/session-data'
+    PORTAL_INTERNAL_URL = os.getenv('PORTAL_INTERNAL_URL', PORTAL_URL)
+    PORTAL_PUBLIC_KEY_ENDPOINT = f'{PORTAL_INTERNAL_URL}/internal/public-key'
+    PORTAL_VERIFY_ENDPOINT = f'{PORTAL_INTERNAL_URL}/internal/verify'
+    PORTAL_REFRESH_ENDPOINT = f'{PORTAL_INTERNAL_URL}/internal/refresh'
+    PORTAL_SESSION_DATA_ENDPOINT = f'{PORTAL_INTERNAL_URL}/internal/session-data'
     
     # Aplicación
     APP_NAME = os.getenv('APP_NAME', 'NiceGUI SSO Demo')
@@ -92,7 +93,7 @@ class PublicKeyManager:
         # Descargar desde portal
         try:
             print(f'🔄 Intentando descargar clave pública de {Config.PORTAL_PUBLIC_KEY_ENDPOINT}...')
-            async with httpx.AsyncClient(verify=False) as client:  # Disable verify for internal/dev issues
+            async with httpx.AsyncClient(verify=True, timeout=10.0) as client:  # Disable verify for internal/dev issues
                 response = await client.get(
                     Config.PORTAL_PUBLIC_KEY_ENDPOINT,
                     timeout=3.0  # Reduce timeout to fail fast
@@ -132,7 +133,7 @@ public_key_manager = PublicKeyManager()
 
 class TokenValidator:
     """Validador de tokens JWT del portal"""
-    
+
     @classmethod
     async def validate_token(cls, token: str) -> Optional[Dict]:
         """
@@ -150,17 +151,17 @@ class TokenValidator:
     async def _validate_token_logic(cls, token: str, force_refresh_key: bool = False) -> Optional[Dict]:
         """Lógica interna de validación con soporte para reintento"""
         if not token:
+            print('✗ Token vacío recibido')
             return None
         
         try:
             # ----------------------------------------
             # PASO 1: Validación Local del JWT Mínimo
             # ----------------------------------------
-            # Obtener clave pública (forzando refresh si es un reintento)
+            print(f'🔐 PASO 1: Validando firma JWT localmente...')
             public_key = await public_key_manager.get_public_key(force_refresh=force_refresh_key)
             
             # Validar token localmente (firma y expiración)
-            # Nota: Este payload es "mínimo" (solo jti, sub, email, exp, iat)
             payload_min = jwt.decode(
                 token,
                 public_key,
@@ -168,30 +169,56 @@ class TokenValidator:
                 audience=Config.APP_AUDIENCE,
                 options={'verify_exp': True}
             )
+            print(f'   ✓ JWT válido (sub={payload_min.get("sub")}, jti={payload_min.get("jti")[:10]}...)')
             
             # -----------------------------------------
             # PASO 2: Recuperación de Datos (Lazy Load)
             # -----------------------------------------
-            # Usar el token validado para solicitar los datos completos de sesión al portal
-            # El portal verificará que la sesión siga activa en Redis
-            async with httpx.AsyncClient(verify=False) as client:  # Verify false for internal/dev compatibility
+            print(f'🌐 PASO 2: Recuperando datos de sesión...')
+            session_url = Config.PORTAL_SESSION_DATA_ENDPOINT
+            request_data = {
+                'jti': payload_min.get('jti'),
+                'email': payload_min.get('email')
+            }
+            
+            # Logging detallado
+            print(f'   🔗 URL: {session_url}')
+            print(f'   📦 Payload: jti={request_data["jti"][:10]}..., email={request_data["email"]}')
+            print(f'   🔒 SSL Verify: False (desarrollo)')
+            
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
                 response = await client.post(
-                    Config.PORTAL_SESSION_DATA_ENDPOINT,
-                    json={
-                        'jti': payload_min.get('jti'),
-                        'email': payload_min.get('email')
-                    },
-                    timeout=5.0
+                    session_url,
+                    json=request_data,
+                    headers={
+                        'Content-Type': 'application/json',
+                        # Si el portal requiere CSRF (no debería), descomentar:
+                        # 'X-CSRFToken': 'bypass',
+                    }
                 )
                 
+                # Logging de respuesta
+                print(f'   📊 Status Code: {response.status_code}')
+                print(f'   📄 Response Headers: {dict(response.headers)}')
+                
                 if response.status_code != 200:
-                    print(f'✗ Error recuperando sesión remota: {response.text}')
+                    print(f'   ✗ Error HTTP {response.status_code}')
+                    print(f'   📝 Response Body (primeros 500 chars):')
+                    print(f'      {response.text[:500]}')
                     return None
                 
-                #Combinar/Usar los datos retornados por el portal que incluyen permisos, perfil, etc.
-                full_payload = response.json()
-                print(f'✓ Token validado y datos recuperados para: {full_payload.get("email")}')
-                return full_payload
+                # Parsear respuesta
+                try:
+                    full_payload = response.json()
+                    print(f'   ✓ Datos recuperados exitosamente')
+                    print(f'   👤 Usuario: {full_payload.get("email")} ({full_payload.get("name")})')
+                    print(f'   🎭 Perfil: {full_payload.get("profile")}')
+                    print(f'   🔑 Permisos: {len(full_payload.get("permissions", []))} apps')
+                    return full_payload
+                except Exception as e:
+                    print(f'   ✗ Error parseando JSON: {e}')
+                    print(f'   📝 Response: {response.text[:200]}')
+                    return None
         
         except (jwt.InvalidSignatureError, jwt.DecodeError) as e:
             # Si falla la firma y NO hemos forzado ya el refresh, intentamos de nuevo
@@ -211,8 +238,14 @@ class TokenValidator:
         except jwt.InvalidTokenError as e:
             print(f'✗ Token inválido: {e}')
             return None
+        except httpx.RequestError as e:
+            print(f'✗ Error de red llamando al portal: {e}')
+            print(f'   URL intentada: {session_url}')
+            return None
         except Exception as e:
-            print(f'✗ Error validando token: {e}')
+            print(f'✗ Error inesperado validando token: {e}')
+            import traceback
+            traceback.print_exc()
             return None
     
     @staticmethod
@@ -227,7 +260,50 @@ class TokenValidator:
             Nuevo token si se renovó exitosamente, None si falló
         """
         try:
-            async with httpx.AsyncClient(verify=True) as client:
+            refresh_url = Config.PORTAL_REFRESH_ENDPOINT
+            print(f'🔄 Renovando token...')
+            print(f'   URL: {refresh_url}')
+            
+            async with httpx.AsyncClient(verify=False, timeout=10.0) as client:
+                response = await client.post(
+                    refresh_url,
+                    json={'token': current_token},
+                    headers={'Content-Type': 'application/json'}
+                )
+                
+                print(f'   Status: {response.status_code}')
+                
+                if response.status_code != 200:
+                    print(f'✗ Error renovando: {response.text[:200]}')
+                    return None
+                
+                data = response.json()
+                new_token = data.get('token')
+                
+                if new_token:
+                    print('✓ Token renovado exitosamente')
+                    return new_token
+                else:
+                    print('✗ Respuesta de refresh sin token')
+                    return None
+        
+        except Exception as e:
+            print(f'✗ Error renovando token: {e}')
+            return None   
+    
+    @staticmethod
+    async def refresh_token(current_token: str) -> Optional[str]:
+        """
+        Renovar token a través del portal
+        
+        Args:
+            current_token: Token actual a renovar
+            
+        Returns:
+            Nuevo token si se renovó exitosamente, None si falló
+        """
+        try:
+            async with httpx.AsyncClient(verify=True, timeout=10.0) as client:
                 response = await client.post(
                     Config.PORTAL_REFRESH_ENDPOINT,
                     json={'token': current_token},
@@ -701,6 +777,12 @@ if __name__ in {"__main__", "__mp_main__"}:
     print('=' * 60)
     
     # app.root_path = base_path  <-- Eliminado, dejamos que Uvicorn/FastAPI lo manejen vía headers
+
+    # ✅ CRÍTICO: Configurar root_path para que NiceGUI genere rutas correctas
+    # cuando está detrás de un proxy con prefijo de ruta
+    from starlette.middleware import Middleware
+    from starlette.middleware.base import BaseHTTPMiddleware
+
     
     ui.run(
         host=host,
@@ -711,4 +793,5 @@ if __name__ in {"__main__", "__mp_main__"}:
         favicon='🔐',
         storage_secret=os.getenv('STORAGE_SECRET', 'WLU-C1yWU7dhhFfXQatn4vzTsHFZj-FkWiggeydlmy4'),
         forwarded_allow_ips='*',
+        root_path=base_path if base_path and base_path != '/' else ''
     )
