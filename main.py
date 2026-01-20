@@ -35,6 +35,9 @@ class Config:
     
     # Portal SSO
     PORTAL_URL = os.getenv('PORTAL_URL', 'https://petunia.apsagroup.com')
+    # EL PORTAL INTERNAL PARA APSA-PORTAL FACILITA LA COMUNICACION CON APLICACION CLIENTE
+    # al consumir la api internal de apsa-dashboard, utilizará la ip interna, ya que por 
+    # motivos de seguridad, acceder a través de portal_url introduce limitaciones
     PORTAL_INTERNAL_URL = os.getenv('PORTAL_INTERNAL_URL', PORTAL_URL)
     PORTAL_PUBLIC_KEY_ENDPOINT = f'{PORTAL_INTERNAL_URL}/internal/public-key'
     PORTAL_VERIFY_ENDPOINT = f'{PORTAL_INTERNAL_URL}/internal/verify'
@@ -533,7 +536,7 @@ def create_header(user_data: Dict):
             if user_data.get('picture'):
                 ui.image(user_data['picture']).classes('w-10 h-10 rounded-full')
             ui.label(user_data.get('name', 'Usuario')).classes('font-semibold')
-            ui.button(icon='logout', on_click=logout).props('flat dense').classes('text-white')
+            #ui.button(icon='logout', on_click=logout).props('flat dense').classes('text-white')
 
 
 def create_user_card(user_data: Dict):
@@ -670,7 +673,8 @@ async def index_page(request: Request):  # ← Usar Request directamente es más
     
     # Verificar si hay error de autenticación
     auth_error = app.storage.user.get('auth_error')
-    if auth_error:
+
+    if (auth_error or token is None):
         with ui.column().classes('w-full h-screen items-center justify-center gap-4 p-8'):
             ui.icon('error', size='4rem').classes('text-red-600')
             ui.label('Error de Autenticación').classes('text-3xl font-bold text-red-600')
@@ -776,14 +780,6 @@ if __name__ in {"__main__", "__mp_main__"}:
     print(f'📡 WS Max Size: {int(os.environ["WS_MAX_SIZE"]) / (1024*1024):.1f}MB')    
     print('=' * 60)
     
-    # app.root_path = base_path  <-- Eliminado, dejamos que Uvicorn/FastAPI lo manejen vía headers
-
-    # ✅ CRÍTICO: Configurar root_path para que NiceGUI genere rutas correctas
-    # cuando está detrás de un proxy con prefijo de ruta
-    from starlette.middleware import Middleware
-    from starlette.middleware.base import BaseHTTPMiddleware
-
-    
     ui.run(
         host=host,
         port=port,
@@ -793,5 +789,4 @@ if __name__ in {"__main__", "__mp_main__"}:
         favicon='🔐',
         storage_secret=os.getenv('STORAGE_SECRET', 'WLU-C1yWU7dhhFfXQatn4vzTsHFZj-FkWiggeydlmy4'),
         forwarded_allow_ips='*',
-        root_path=base_path if base_path and base_path != '/' else ''
     )
