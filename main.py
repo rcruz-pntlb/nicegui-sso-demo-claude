@@ -217,6 +217,19 @@ class TokenValidator:
                     print(f'   👤 Usuario: {full_payload.get("email")} ({full_payload.get("name")})')
                     print(f'   🎭 Perfil: {full_payload.get("profile")}')
                     print(f'   🔑 Permisos: {len(full_payload.get("permissions", []))} apps')
+                    
+                    # IMPORTANTE: Combinar claims del JWT mínimo con datos completos
+                    # El full_payload del portal NO incluye iss, aud, iat, exp, jti
+                    # pero los necesitamos para mostrarlos en create_token_card()
+                    full_payload.update({
+                        'iss': payload_min.get('iss'),
+                        'aud': payload_min.get('aud'),
+                        'iat': payload_min.get('iat'),
+                        'exp': payload_min.get('exp'),
+                        'jti': payload_min.get('jti')
+                    })
+                    
+                    print(f'   ✓ Claims JWT agregados: iss={payload_min.get("iss")}, aud={payload_min.get("aud")}')
                     return full_payload
                 except Exception as e:
                     print(f'   ✗ Error parseando JSON: {e}')

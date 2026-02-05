@@ -2,7 +2,7 @@
 
 ## 🎯 Objetivo
 
-Esta guía te llevará paso a paso para integrar tu aplicación NiceGUI con el sistema SSO del portal APSA Dashboard.
+Guía paso a paso para integrar una aplicación NiceGUI con el sistema Lazy SSO de APSA Portal Dashboard.
 
 ## 📋 Pre-requisitos
 
@@ -10,8 +10,8 @@ Antes de comenzar, asegúrate de tener:
 
 - ✅ Acceso al portal APSA Dashboard (como administrador)
 - ✅ Docker y Docker Compose instalados
-- ✅ Apache configurado como proxy reverso
-- ✅ Dominio/subdominio accesible (ej: `petunia.apsagroup.com`)
+- ✅ Apache proxy reverso configurado
+- ✅ Dominio/subdominio para proxy reverso accesible (ej: `petunia.apsagroup.com`)
 
 ## 🚀 Paso 1: Clonar la Plantilla
 
@@ -45,16 +45,16 @@ PORTAL_URL=https://petunia.apsagroup.com
 # Nombre de tu aplicación (será visible en el portal)
 APP_NAME=Mi Aplicación Cool
 
-# CRÍTICO: Debe coincidir con el nombre registrado en el portal
+# CRÍTICO: Debe coincidir con el audience registrado en el portal para la aplicación
 APP_AUDIENCE=mi-app-cool
 
-# Base path del proxy reverso
+# Base path del proxy reverso a la aplicación
 BASE_PATH=/mi-app-cool
 ```
 
 ### ⚠️ IMPORTANTE: APP_AUDIENCE
 
-El valor de `APP_AUDIENCE` debe coincidir **EXACTAMENTE** con el campo `name` de la webapp en la base de datos del portal APSA Dashboard:
+El valor de `APP_AUDIENCE` debe coincidir **EXACTAMENTE** con el campo `audience` de la webapp en APSA Portal Dashboard, hecho que podremos corroborar a través del frontend de administración de APSA Portal Dashboard, o también directamente via SQL:
 
 ```sql
 -- En la BD del portal, el campo name debe ser igual:
@@ -65,10 +65,10 @@ Si no coinciden → **Token inválido** → Autenticación falla ❌
 
 ## 👨‍💻 Paso 2.5: Implementar Lógica SSO Lazy (Código Python)
 
-El sistema ahora utiliza **"Lazy SSO"** para eficiencia. Esto significa que tu aplicación debe realizar la validación en **dos pasos**:
+El sistema ahora utiliza **"Lazy SSO"** para eficiencia, ya que el tamaño de token que se puede proporcionar via url a las apliaciones tiene un límite de tamaño y hay que manejarlo con cuidado. Esto significa que toda aplicación debe realizar la validación en **dos pasos**:
 
-1. **Validar JWT (Local):** Verificar firma y expiración del token mínimo.
-2. **Obtener Datos (Remoto):** Llamar al endpoint `/internal/session-data` para obtener permisos y perfil.
+1. **Validar JWT (Local):** Verificar firma y expiración del token mínimo (implica token de tamaño mínimo).
+2. **Obtener Datos (Remoto):** Llamar al endpoint `/internal/session-data` para obtener permisos y datos de perfil adicionales (sin restricción de tamaño ya que la respuesta es via JSON).
 
 ### Código de Validación en `main.py`
 
@@ -154,12 +154,14 @@ def validate_token_and_get_user(token: str) -> Optional[dict]:
 
 2. **Completar formulario:**
    ```
-   Nombre:          mi-app-cool        # ← DEBE coincidir con APP_AUDIENCE
-   Descripción:     Mi Aplicación Cool
+   Nombre:          Mi App Cool 
+   Descripción:     Es mi Aplicación Cool sólo para regocijo personal
    URL:             https://petunia.apsagroup.com/mi-app-cool/
    Categoría:       [Seleccionar apropiada]
    Tipo (Origin):   internal           # ← Para SSO con JWT
+   Audiencia:       mi-app-cool        # ← DEBE coincidir con APP_AUDIENCE
    Icono:           bi-grid-3x3        # ← Cualquier icono Bootstrap
+   ... etc
    Activa:          ✓ Sí
    ```
 
@@ -579,4 +581,3 @@ Si encuentras problemas:
 
 ---
 
-**¡Éxito con tu integración!** 🎉

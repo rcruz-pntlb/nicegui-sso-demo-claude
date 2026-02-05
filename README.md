@@ -21,28 +21,13 @@ Esta es una aplicación de demostración que implementa una integración complet
 
 El sistema funciona mediante una arquitectura de Microservicios detrás de un Proxy Inverso (Traefik/Apache/Nginx).
 
-```mermaid
-graph TD
-    User((Usuario))
-    Proxy[Proxy Reverso\n(Traefik/Apache)]
-    Portal[APSA Dashboard\n(Proveedor Identidad)]
-    App[NiceGUI App\n(Este Proyecto)]
-    
-    User -->|HTTPS| Proxy
-    Proxy -->|/nicegui-demo| App
-    Proxy -->|/portal| Portal
-    
-    App -.->|Valida Token| Portal
-    App -.->|Obtiene PubKey| Portal
-```
-
-1. **Usuario accede a la App**: La petición llega al Proxy.
+1. **Usuario accede a la App (desde apsa-portal-dashboard o directamente mediante url)**
 2. **Validación**:
-   - Si tiene token válido: Accede a la App.
-   - Si no tiene token: La App redirige al Portal.
-3. **Login en Portal**: Usuario se autentica en el Portal.
-4. **Redirección**: Portal redirige de vuelta a la App con un token JWT en la URL.
-5. **Establecimiento de Sesión**: La App valida el token y crea una sesión segura.
+   - Desde apsa-portal-dashboard con token válido: Accede a la App.
+   - Desde fuera de apsa-portal-dashboard sin token: no permitido.
+3. **Login en Portal**: Usuario se autentica en el Portal para acceder a la aplicación.
+4. **Paso de Token**: Portal realiza las llamadas a las Apps proporcionándoles un token JWT.
+5. **Establecimiento de Sesión**: Cada App valida el token y crea entonces una sesión segura.
 
 ## 🚀 Instalación y Despliegue
 
